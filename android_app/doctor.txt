@@ -1,0 +1,43 @@
+[√] Flutter (Channel stable, 3.16.9, on Microsoft Windows [版本 10.0.20348.3807], locale zh-CN)
+    • Flutter version 3.16.9 on channel stable at C:\src\flutter
+    • Upstream repository https://github.com/flutter/flutter.git
+    • Framework revision 41456452f2 (2 years ago), 2024-01-25 10:06:23 -0800
+    • Engine revision f40e976bed
+    • Dart version 3.2.6
+    • DevTools version 2.28.5
+
+[√] Windows Version (Installed version of Windows is version 10 or higher)
+
+[√] Android toolchain - develop for Android devices (Android SDK version 36.1.0)
+    • Android SDK at C:\Users\Administrator\AppData\Local\Android\sdk
+    • Platform android-36, build-tools 36.1.0
+    • Java binary at: D:\Program Files\Android\Android Studio\jbr\bin\java
+    • Java version OpenJDK Runtime Environment (build 21.0.8+-14196175-b1038.72)
+    • All Android licenses accepted.
+
+[√] Chrome - develop for the web
+    • Chrome at C:\Program Files\Google\Chrome\Application\chrome.exe
+
+[!] Visual Studio - develop Windows apps (Visual Studio 生成工具 2019 16.11.49)
+    • Visual Studio at C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools
+    • Visual Studio 生成工具 2019 version 16.11.36227.6
+    X The current Visual Studio installation is incomplete.
+      Please use Visual Studio Installer to complete the installation or reinstall Visual Studio.
+
+[√] Android Studio (version 2025.2.2)
+    • Android Studio at D:\Program Files\Android\Android Studio
+    • Flutter plugin can be installed from:
+       https://plugins.jetbrains.com/plugin/9212-flutter
+    • Dart plugin can be installed from:
+       https://plugins.jetbrains.com/plugin/6351-dart
+    • Java version OpenJDK Runtime Environment (build 21.0.8+-14196175-b1038.72)
+
+[√] Connected device (3 available)
+    • Windows (desktop) • windows • windows-x64    • Microsoft Windows [版本 10.0.20348.3807]
+    • Chrome (web)      • chrome  • web-javascript • Google Chrome 143.0.7499.193
+    • Edge (web)        • edge    • web-javascript • Microsoft Edge 143.0.3650.96
+
+[√] Network resources
+    • All expected network resources are available.
+
+! Doctor found issues in 1 category.

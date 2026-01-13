@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phone2PC 连接测试</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .status { padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+        .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #f8d7da; color: #721c24; }
+        input { padding: 8px; width: 200px; }
+        button { padding: 8px 16px; }
+    </style>
+</head>
+<body>
+    <h2>WebSocket 连接测试</h2>
+    <p>请输入 PC 的 IP 地址进行测试：</p>
+    <div>
+        <input type="text" id="ipInput" placeholder="例如 192.168.1.100" value="localhost">
+        <button onclick="testConnection()">测试连接</button>
+    </div>
+    <div id="result" style="margin-top: 20px;"></div>
+
+    <script>
+        function log(msg, type='neutral') {
+            const div = document.createElement('div');
+            div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            div.className = 'status ' + type;
+            document.getElementById('result').prepend(div);
+        }
+
+        function testConnection() {
+            const ip = document.getElementById('ipInput').value.trim();
+            if (!ip) return;
+
+            const url = `ws://${ip}:8765`;
+            log(`尝试连接到: ${url}...`);
+
+            try {
+                const ws = new WebSocket(url);
+
+                ws.onopen = () => {
+                    log('✅ 连接成功！端口 8765 可访问。', 'success');
+                    ws.send('BROWSER_TEST');
+                    ws.close();
+                };
+
+                ws.onerror = (error) => {
+                    console.error(error);
+                    log('❌ 连接失败。请检查：1. IP是否正确 2. 防火墙是否拦截 3. 手机是否在同一WiFi', 'error');
+                };
+
+                ws.onclose = () => {
+                    log('连接已关闭。');
+                };
+            } catch (e) {
+                log('❌ 发生异常: ' + e.message, 'error');
+            }
+        }
+    </script>
+</body>
+</html>

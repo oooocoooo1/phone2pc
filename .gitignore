@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Flutter / Android
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+android/.gradle
+android/app/build
+android/key.properties
+.pub-cache/
+.packages
+
+# VS Code
+.vscode/
+
+# Project Specific
+dist/
+received_files/
+pc_server/received_files/
+input_log.txt
