@@ -17,15 +17,11 @@ A lightweight, high-performance tool for seamless collaboration between Android 
 *   **⚡ Zero-Latency Connection**: Uses WebSocket for real-time bi-directional communication over local LAN.
 *   **📋 Clipboard Sync**: Copy text on your phone, paste on PC (and vice-versa) instantly.
 *   **📂 High-Speed File Transfer**:
-    *   Supports binary transfer protocol (v5.0+).
+    *   Supports binary transfer protocol.
     *   Smart flow control for stability on any network.
-    *   Resume support and batch transfer.
+    *   Batch transfer.
 *   **⌨️ Remote Input**: Type on your phone's keyboard and send text directly to your PC's active window.
-*   **🔧 User-Friendly**:
-    *   PC App minimizes to taskbar/tray automatically (v5.2).
-    *   Android App supports background keep-alive and auto-reconnect.
-    *   Handshake protocol ensures reliable connection status.
-
+*
 ### 🚀 Getting Started
 
 #### 1. Requirements
@@ -35,13 +31,13 @@ A lightweight, high-performance tool for seamless collaboration between Android 
 
 #### 2. Installation
 *   **PC**: Download and run `phone2pc.exe` (No installation required).
-*   **Android**: Install `phone2pc_v5.2.apk` on your phone.
+*   **Android**: Install `phone2pc.apk` on your phone.
 
 #### 3. Usage
 1.  Run `phone2pc.exe` on your computer. Note the IP address displayed (or let the app auto-detect).
 2.  Open the **Phone2PC** app on Android.
 3.  Enter your PC's IP address and tap **Connect**.
-4.  Once you see "Connected (v5.2)", you are ready to go!
+4.  Once you see "Connected", you are ready to go!
     *   **Text**: Type in the text box and hit Send (or enable "Enter to Send").
     *   **File**: Go to the "File" tab to select and send files.
     *   **Clipboard**: Enabling the service automatically syncs your clipboard history.
@@ -62,14 +58,11 @@ Built with:
 *   **⚡ 极速连接**: 基于 WebSocket 的局域网实时双向通信，无需联网，安全快速。
 *   **📋 剪贴板同步**: 手机复制，电脑粘贴（反之亦然）。支持历史记录查看。
 *   **📂 高速文件传输**:
-    *   采用 v5.0 二进制传输协议，无需 Base64 转码，效率更高。
+    *   采用二进制传输协议，无需 Base64 转码，效率更高。
     *   智能流控机制，告别大文件传输卡顿。
-    *   支持批量发送、断点续传。
+    *   支持批量发送。
 *   **⌨️ 远程输入**: 将手机作为电脑的无线键盘，直接将文字输入到电脑当前活动窗口。
-*   **🔧 贴心体验**:
-    *   PC 端启动即自动最小化到任务栏，不打扰工作 (v5.2)。
-    *   Android 端支持后台保活，锁屏也不易断连。
-    *   握手协议确保“已连接”状态真实可靠。
+
 
 ### 🚀 使用指南
 
@@ -80,13 +73,13 @@ Built with:
 
 #### 2. 安装说明
 *   **电脑端**: 下载 `phone2pc.exe` 直接运行即可（绿色免安装）。
-*   **安卓端**: 下载并安装 `phone2pc_v5.2.apk`。
+*   **安卓端**: 下载并安装 `phone2pc.apk`。
 
 #### 3. 操作步骤
 1.  在电脑上运行 `phone2pc.exe`，允许防火墙访问。
 2.  打开手机 APP，输入电脑显示的 IP 地址（APP 会记录历史 IP）。
 3.  点击 **连接**。
-4.  当状态栏显示“已连接 (v5.2)”时：
+4.  当状态栏显示“已连接”时：
     *   **输入**: 在输入框打字，电脑端即刻响应。
     *   **文件**: 切换到“文件”标签页，选择照片或文件发送。
     *   **剪贴板**: 只要 APP 在运行，剪贴板变化会自动同步。
