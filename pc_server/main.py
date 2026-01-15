@@ -51,11 +51,11 @@ def resource_path(relative_path):
 class AppGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Phone2PC 智连 (v5.2)")
+        self.root.title("Phone2PC 智连 (v5.2.2)")
         self.root.geometry("500x600")
         
-        # 启动时自动最小化到任务栏
-        self.root.iconify()
+        # 启动时最小化到通知区域 (隐藏窗口)
+        self.root.withdraw()
         
         # 设置窗口图标 (Runtime)
         try:
@@ -325,11 +325,22 @@ class AppGUI:
             logging.error(f"托盘启动失败: {e}")
 
     def _init_tray(self):
-        width = 64
-        height = 64
-        image = Image.new('RGB', (width, height), color=(73, 109, 137))
-        dc = ImageDraw.Draw(image)
-        dc.rectangle([16, 16, 48, 48], fill='white')
+        try:
+            # 尝试加载应用图标
+            icon_path = resource_path("pc_server/icon.ico")
+            if not os.path.exists(icon_path):
+                 icon_path = resource_path("icon.ico")
+            if not os.path.exists(icon_path) and os.path.exists("pc_server/icon.ico"):
+                 icon_path = "pc_server/icon.ico"
+            
+            image = Image.open(icon_path)
+        except Exception:
+            # 加载失败则绘制默认图标
+            width = 64
+            height = 64
+            image = Image.new('RGB', (width, height), color=(73, 109, 137))
+            dc = ImageDraw.Draw(image)
+            dc.rectangle([16, 16, 48, 48], fill='white')
         
         # 将左键点击绑定到显示窗口
         menu = (pystray.MenuItem('显示窗口', self._show_window, default=True), pystray.MenuItem('退出', self._quit_app))
