@@ -5,8 +5,22 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'file_transfer_page.dart';
+
+// v5.3: 后台通知处理器 (点击复制按钮时复制剪贴板，不打开APP)
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse response) {
+  // 后台/isolate环境需要初始化bindings才能使用Clipboard
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // 从payload获取要复制的内容
+  if (response.payload != null && response.payload!.isNotEmpty) {
+    Clipboard.setData(ClipboardData(text: response.payload!));
+  }
+}
 
 void main() {
   runApp(const MyApp());
@@ -18,7 +32,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '智连 (v5.2)',
+      title: '智连 (v5.3)',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
@@ -36,6 +50,16 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
+  // v5.3: Native Method Channel
+  static const platform = MethodChannel('com.example.android_app/channel');
+
+  Future<void> _minimizeApp() async {
+    try {
+      await platform.invokeMethod('minimize');
+    } catch (e) {
+      debugPrint("Minimize error: $e");
+    }
+  }
   // WebSocket
   WebSocketChannel? _channel;
   bool _isConnected = false;
@@ -60,18 +84,89 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   int _selectedIndex = 0;
   String _statusData = "未连接";
   bool _enterToSend = false; // Default false
+  bool _persistentMode = false; // v5.3: 常驻模式
+  
+  // Notification Plugin (v5.3)
+  final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
+  String? _pendingCopyContent; // 待复制的内容
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadIpHistory();
+    _initNotifications(); // v5.3
     // 启动剪贴板轮询 (每2秒检查一次)
     _clipboardTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
       if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
         _checkClipboard();
       }
     });
+  }
+  
+  // v5.3: 初始化通知插件
+  Future<void> _initNotifications() async {
+    // 请求通知权限 (Android 13+)
+    final status = await Permission.notification.request();
+    if (status.isDenied) {
+      debugPrint('通知权限被拒绝');
+    }
+    
+    const AndroidInitializationSettings initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const InitializationSettings initSettings = InitializationSettings(android: initAndroid);
+    await _notificationsPlugin.initialize(
+      initSettings,
+      onDidReceiveNotificationResponse: _onNotificationTap,
+      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+    );
+  }
+  
+  // v5.3: 点击通知复制按钮时复制到剪贴板，然后最小化APP
+  void _onNotificationTap(NotificationResponse response) async {
+    final content = response.payload ?? _pendingCopyContent;
+    if (content != null && content.isNotEmpty) {
+      await Clipboard.setData(ClipboardData(text: content));
+      _lastClipboardContent = content;
+      
+      // 复制完成后立即最小化到后台
+      _minimizeApp();
+    }
+  }
+  
+  // v5.3: 显示剪贴板同步通知 (带复制按钮，点击走后台处理)
+  Future<void> _showClipboardNotification(String content) async {
+    _pendingCopyContent = content;
+    final displayText = content.length > 100 ? '${content.substring(0, 100)}...' : content;
+    
+    // 使用 BigTextStyleInformation 增加系统展开通知的概率
+    final AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'clipboard_sync',
+      '剪贴板同步',
+      channelDescription: 'PC剪贴板内容同步通知',
+      importance: Importance.max,   // 使用 max
+      priority: Priority.high,
+      ticker: 'PC剪贴板同步',
+      autoCancel: true,
+      styleInformation: BigTextStyleInformation(displayText), // 展开样式
+      actions: <AndroidNotificationAction>[
+        AndroidNotificationAction(
+          'copy_action',
+          '复制',
+          icon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+          showsUserInterface: true,  // 使用前台handler，才能访问系统剪贴板
+          cancelNotification: true,
+        ),
+      ],
+    );
+    final NotificationDetails details = NotificationDetails(android: androidDetails);
+    
+    await _notificationsPlugin.show(
+      1,
+      '📋 PC剪贴板 (点击复制按钮)',
+      displayText,
+      details,
+      payload: content,
+    );
   }
 
   @override
@@ -217,6 +312,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       
       if (type == 'CLIPBOARD_SYNC' && data['source'] == 'PC') {
         final content = data['content'];
+        _showClipboardNotification(content); // v5.3: 发送通知
         setState(() {
           _addToPcHistory(content);
         });
@@ -330,62 +426,70 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   // --- UI Construction ---
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('智连 Phone2PC'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        actions: [
-            Padding(
-              padding: const EdgeInsets.only(right: 16),
-              child: GestureDetector(
-                onTap: () {
-                  if (_isConnected) {
-                    // Manual Disconnect
-                    _channel?.sink.close();
-                    setState(() {
-                      _isConnected = false;
-                      _statusData = "已手动断开";
-                    });
-                  } else {
-                    // Manual Connect (Retry last IP)
-                    if (_ipController.text.isNotEmpty) {
-                      _connect(_ipController.text);
-                    } else if (_ipHistory.isNotEmpty) {
-                      _ipController.text = _ipHistory.first;
-                      _connect(_ipHistory.first);
+    // 按返回键时最小化到后台，不断开连接
+    return WillPopScope(
+      onWillPop: () async {
+        // 最小化到后台，不关闭APP
+        _minimizeApp();
+        return false; // 阻止默认返回
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('智连 Phone2PC'),
+          backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+          actions: [
+              Padding(
+                padding: const EdgeInsets.only(right: 16),
+                child: GestureDetector(
+                  onTap: () {
+                    if (_isConnected) {
+                      // Manual Disconnect
+                      _channel?.sink.close();
+                      setState(() {
+                        _isConnected = false;
+                        _statusData = "已手动断开";
+                      });
                     } else {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("请输入 IP 地址")));
+                      // Manual Connect (Retry last IP)
+                      if (_ipController.text.isNotEmpty) {
+                        _connect(_ipController.text);
+                      } else if (_ipHistory.isNotEmpty) {
+                        _ipController.text = _ipHistory.first;
+                        _connect(_ipHistory.first);
+                      } else {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("请输入 IP 地址")));
+                      }
                     }
-                  }
-                },
-                child: Icon(
-                  _isConnected ? Icons.link : Icons.link_off, 
-                  color: _isConnected ? Colors.green : Colors.grey
-                )
-              ),
-            )
-        ],
-      ),
-      body: IndexedStack( // Use IndexedStack to keep state alive
-        index: _selectedIndex,
-        children: [
-            _buildInputPage(),
-            _buildClipboardPage(),
-            FileTransferPage( // [NEW]
-                key: _fileTransferKey,
-                onSendJson: _sendJson,
-                onSendBinary: _sendBinary,
-            )
-        ],
-      ),
-      bottomNavigationBar: BottomNavigationBar(
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.keyboard), label: '输入'),
-          BottomNavigationBarItem(icon: Icon(Icons.copy), label: '云剪贴板'),
-          BottomNavigationBarItem(icon: Icon(Icons.folder), label: '文件'),
-        ],
-        currentIndex: _selectedIndex,
-        onTap: (index) => setState(() => _selectedIndex = index),
+                  },
+                  child: Icon(
+                    _isConnected ? Icons.link : Icons.link_off, 
+                    color: _isConnected ? Colors.green : Colors.grey
+                  )
+                ),
+              )
+          ],
+        ),
+        body: IndexedStack( // Use IndexedStack to keep state alive
+          index: _selectedIndex,
+          children: [
+              _buildInputPage(),
+              _buildClipboardPage(),
+              FileTransferPage( // [NEW]
+                  key: _fileTransferKey,
+                  onSendJson: _sendJson,
+                  onSendBinary: _sendBinary,
+              )
+          ],
+        ),
+        bottomNavigationBar: BottomNavigationBar(
+          items: const [
+            BottomNavigationBarItem(icon: Icon(Icons.keyboard), label: '输入'),
+            BottomNavigationBarItem(icon: Icon(Icons.copy), label: '云剪贴板'),
+            BottomNavigationBarItem(icon: Icon(Icons.folder), label: '文件'),
+          ],
+          currentIndex: _selectedIndex,
+          onTap: (index) => setState(() => _selectedIndex = index),
+        ),
       ),
     );
   }

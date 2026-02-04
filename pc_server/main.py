@@ -278,8 +278,9 @@ class AppGUI:
                 content = data.get("content", "")
                 if content:
                     self.clipboard_manager.add_phone_history(content)
+                    self.clipboard_manager.set_clipboard(content)  # v5.3: 自动写入PC剪贴板
                     self.root.after(0, lambda: self._update_list("phone"))
-                    logging.info("收到手机剪贴板同步")
+                    logging.info("收到手机剪贴板同步，已写入本机剪贴板")
                 return
             
             # 路由：文件消息 (包括 ACK)
