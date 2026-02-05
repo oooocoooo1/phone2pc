@@ -1,7 +1,7 @@
 # Phone2PC (智连)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-v5.2-green)
+![Version](https://img.shields.io/badge/version-v5.3-green)
 
 A lightweight, high-performance tool for seamless collaboration between Android and PC. Connect your phone to your computer via local Wi-Fi to sync clipboards, transfer files, and use your phone as a remote text input device.
 
@@ -15,13 +15,15 @@ A lightweight, high-performance tool for seamless collaboration between Android 
 ### ✨ Features
 
 *   **⚡ Zero-Latency Connection**: Uses WebSocket for real-time bi-directional communication over local LAN.
-*   **📋 Clipboard Sync**: Copy text on your phone, paste on PC (and vice-versa) instantly.
+*   **📋 Clipboard Sync**: 
+    *   **Foreground**: Automatically syncs when app is open.
+    *   **Background**: Sync via notification "Send to PC" button (Android 10+ restriction compliant).
 *   **📂 High-Speed File Transfer**:
     *   Supports binary transfer protocol.
     *   Smart flow control for stability on any network.
     *   Batch transfer.
 *   **⌨️ Remote Input**: Type on your phone's keyboard and send text directly to your PC's active window.
-*
+
 ### 🚀 Getting Started
 
 #### 1. Requirements
@@ -40,7 +42,9 @@ A lightweight, high-performance tool for seamless collaboration between Android 
 4.  Once you see "Connected", you are ready to go!
     *   **Text**: Type in the text box and hit Send (or enable "Enter to Send").
     *   **File**: Go to the "File" tab to select and send files.
-    *   **Clipboard**: Enabling the service automatically syncs your clipboard history.
+    *   **Clipboard**: 
+        *   Keep app in foreground for auto-sync.
+        *   Use notification "Send to PC" action when app is in background.
 
 ### 🛠️ Development
 
@@ -56,7 +60,9 @@ Built with:
 ### ✨ 主要功能
 
 *   **⚡ 极速连接**: 基于 WebSocket 的局域网实时双向通信，无需联网，安全快速。
-*   **📋 剪贴板同步**: 手机复制，电脑粘贴（反之亦然）。支持历史记录查看。
+*   **📋 剪贴板同步**:
+    *   **前台自动**: APP 处于前台时自动同步。
+    *   **后台手动**: 通过通知栏“发送到电脑”按钮同步（符合安卓隐私规范）。
 *   **📂 高速文件传输**:
     *   采用二进制传输协议，无需 Base64 转码，效率更高。
     *   智能流控机制，告别大文件传输卡顿。
@@ -82,7 +88,9 @@ Built with:
 4.  当状态栏显示“已连接”时：
     *   **输入**: 在输入框打字，电脑端即刻响应。
     *   **文件**: 切换到“文件”标签页，选择照片或文件发送。
-    *   **剪贴板**: 只要 APP 在运行，剪贴板变化会自动同步。
+    *   **剪贴板**:
+        *   APP 保持前台可自动同步。
+        *   APP 在后台时，点击通知栏的“发送到电脑”即可同步。
 
 ### 🛠️ 开发构建
 
