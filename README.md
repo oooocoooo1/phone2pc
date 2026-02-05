@@ -44,7 +44,6 @@ A lightweight, high-performance tool for seamless collaboration between Android 
     *   **File**: Go to the "File" tab to select and send files.
     *   **Clipboard**: 
         *   Keep app in foreground for auto-sync.
-        *   Use notification "Send to PC" action when app is in background.
 
 ### 🛠️ Development
 
@@ -90,7 +89,6 @@ Built with:
     *   **文件**: 切换到“文件”标签页，选择照片或文件发送。
     *   **剪贴板**:
         *   APP 保持前台可自动同步。
-        *   APP 在后台时，点击通知栏的“发送到电脑”即可同步。
 
 ### 🛠️ 开发构建
 
