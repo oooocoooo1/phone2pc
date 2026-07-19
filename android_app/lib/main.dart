@@ -40,7 +40,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '智连 (v5.7)',
+      title: '智连 (v5.7.3)',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
@@ -90,10 +90,12 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   final TextEditingController _ipController = TextEditingController();
   final TextEditingController _pairingCodeController = TextEditingController();
   final TextEditingController _textController = TextEditingController();
+  final FocusNode _textFocusNode = FocusNode();
   String _deviceId = '';
 
   // History
   List<String> _ipHistory = [];
+  List<String> _sentTextHistory = [];
 
   // Clipboard Data
   List<String> _pcHistory = [];
@@ -222,6 +224,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     _ipController.dispose();
     _pairingCodeController.dispose();
     _textController.dispose();
+    _textFocusNode.dispose();
     super.dispose();
   }
 
@@ -312,14 +315,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _openAppSettings() async {
-    try {
-      await platform.invokeMethod('openAppSettings');
-    } catch (error) {
-      debugPrint('Open app settings error: $error');
-    }
-  }
-
   // --- Clipboard Logic ---
   Future<void> _checkClipboard() async {
     ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -366,10 +361,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   // --- WebSocket Logic ---
-  Future<void> _connect(
-    String ip, {
-    bool rememberConnection = true,
-  }) async {
+  Future<void> _connect(String ip, {bool rememberConnection = true}) async {
     ip = ip.trim();
     if (ip.isEmpty) return;
     if (!_isValidHost(ip)) {
@@ -593,16 +585,113 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       ).showSnackBar(const SnackBar(content: Text("正在连接，请连接成功后再次发送")));
       return;
     }
-    if (_textController.text.isNotEmpty) {
-      if (utf8.encode(_textController.text).length > maxRemoteInputBytes) {
+    final message = _textController.text;
+    if (message.isNotEmpty) {
+      if (utf8.encode(message).length > maxRemoteInputBytes) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text("输入内容不能超过 64 KiB")));
         return;
       }
-      _channel?.sink.add(_textController.text);
+      _channel?.sink.add(message);
+      _addToSentTextHistory(message);
       _textController.clear();
     }
+  }
+
+  void _addToSentTextHistory(String message) {
+    setState(() {
+      _sentTextHistory.remove(message);
+      _sentTextHistory.insert(0, message);
+      if (_sentTextHistory.length > 50) _sentTextHistory.removeLast();
+    });
+    unawaited(_saveSentTextHistory());
+  }
+
+  void _loadSentText(String message) {
+    _textController.value = TextEditingValue(
+      text: message,
+      selection: TextSelection.collapsed(offset: message.length),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _textFocusNode.requestFocus();
+    });
+  }
+
+  void _resendSentText(String message) {
+    _loadSentText(message);
+    _sendMessage();
+  }
+
+  Future<void> _showSentTextHistory() async {
+    FocusScope.of(context).unfocus();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: FractionallySizedBox(
+          heightFactor: 0.65,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.history),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        '已发送内容',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '关闭',
+                      onPressed: () => Navigator.of(sheetContext).pop(),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView.separated(
+                  itemCount: _sentTextHistory.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (_, index) {
+                    final message = _sentTextHistory[index];
+                    return ListTile(
+                      leading: const Icon(Icons.text_snippet_outlined),
+                      title: Text(
+                        message,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: const Text('点击回填到输入框'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        _loadSentText(message);
+                      },
+                      trailing: IconButton(
+                        tooltip: '重新发送',
+                        icon: const Icon(Icons.replay),
+                        onPressed: () {
+                          Navigator.of(sheetContext).pop();
+                          _resendSentText(message);
+                        },
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _tryAutoConnect() {
@@ -693,6 +782,14 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           .where((item) => utf8.encode(item).length <= maxHistoryItemBytes)
           .take(50)
           .toList();
+      _sentTextHistory = (prefs.getStringList('sent_text_history') ?? [])
+          .where(
+            (item) =>
+                item.isNotEmpty &&
+                utf8.encode(item).length <= maxRemoteInputBytes,
+          )
+          .take(50)
+          .toList();
       _enterToSend = prefs.getBool('enter_to_send') ?? false;
     });
   }
@@ -710,6 +807,11 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   Future<void> _savePhoneHistory() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('phone_history', _phoneHistory);
+  }
+
+  Future<void> _saveSentTextHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('sent_text_history', _sentTextHistory);
   }
 
   Future<void> _saveIpToHistory(String ip) async {
@@ -829,29 +931,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           child: Text(_statusData, textAlign: TextAlign.center),
         ),
 
-        if (_maintainConnection)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-            color: Colors.blueGrey.shade50,
-            child: Row(
-              children: [
-                const Icon(Icons.shield_outlined, size: 20),
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text(
-                    '后台常驻已开启。小米/HyperOS 建议允许自启动，并把电量策略设为“无限制”。',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                ),
-                TextButton(
-                  onPressed: _openAppSettings,
-                  child: const Text('系统设置'),
-                ),
-              ],
-            ),
-          ),
-
         // Connection Area
         if (!_isConnected) ...[
           Padding(
@@ -918,50 +997,45 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         ] else ...[
           // Input Area
           Expanded(
-            child: SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.all(20.0),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.start, // Top aligned
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const SizedBox(height: 10), // Reduced spacer
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.shade50,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Row(
-                        children: [
-                          Icon(Icons.link, size: 20, color: Colors.blue),
-                          SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              "已连接，在此输入文字发送给 PC",
-                              style: TextStyle(color: Colors.blue),
-                            ),
-                          ),
-                        ],
-                      ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    const SizedBox(height: 20),
+                    child: const Text(
+                      '在此输入文字发送给 PC',
+                      style: TextStyle(color: Colors.blue),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
 
-                    // Input Field
-                    TextField(
+                  // Fill the remaining height so the editor automatically
+                  // grows and shrinks when the software keyboard changes the
+                  // Scaffold's available space.
+                  Expanded(
+                    child: TextField(
                       controller: _textController,
+                      focusNode: _textFocusNode,
                       autofocus: true,
+                      expands: true,
+                      minLines: null,
+                      maxLines: null,
+                      textAlignVertical: TextAlignVertical.top,
                       decoration: const InputDecoration(
                         border: OutlineInputBorder(),
                         labelText: '发送内容',
                         alignLabelWithHint: true,
                       ),
-                      minLines: 3,
-                      maxLines: 8, // Increased height
                       maxLength: 65536,
                       onChanged: (val) {
                         if (_enterToSend && val.endsWith("\n")) {
-                          // Remove the newline
                           _textController.text = val.substring(
                             0,
                             val.length - 1,
@@ -974,13 +1048,29 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                         }
                       },
                     ),
-                    const SizedBox(height: 10),
-
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        // Switch
-                        Row(
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: OutlinedButton.icon(
+                      onPressed: _sentTextHistory.isEmpty
+                          ? null
+                          : _showSentTextHistory,
+                      icon: const Icon(Icons.history),
+                      label: Text(
+                        _sentTextHistory.isEmpty
+                            ? '暂无已发送内容'
+                            : '翻看已发送 (${_sentTextHistory.length})',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Flexible(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             Switch(
                               value: _enterToSend,
@@ -989,19 +1079,19 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                                 _saveEnterToSend();
                               },
                             ),
-                            const Text("即输即发(回车发送)"),
+                            const Flexible(child: Text("即输即发(回车发送)")),
                           ],
                         ),
-
-                        ElevatedButton.icon(
-                          onPressed: _sendMessage,
-                          icon: const Icon(Icons.send),
-                          label: const Text("发送"),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton.icon(
+                        onPressed: _sendMessage,
+                        icon: const Icon(Icons.send),
+                        label: const Text("发送"),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
