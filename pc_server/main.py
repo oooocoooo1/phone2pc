@@ -116,7 +116,11 @@ class AppGUI:
     def __init__(self, root):
         self.root = root
         self.root.title(f"Phone2PC 智连 (v{APP_VERSION})")
-        self.root.geometry("500x600")
+        # Leave enough room for the pairing controls and transfer history at
+        # common Windows display scaling levels.  Keep a practical minimum so
+        # resizing the window cannot hide the reset-device button again.
+        self.root.geometry("720x720")
+        self.root.minsize(680, 640)
         
         # 设置窗口图标 (Runtime)
         try:
@@ -212,7 +216,12 @@ class AppGUI:
             fg="#D84315",
         ).pack(side=tk.LEFT, padx=8)
         tk.Label(pairing_frame, text="首次连接时在手机输入", fg="gray").pack(side=tk.LEFT)
-        tk.Button(pairing_frame, text="重置设备", command=self._reset_pairing).pack(side=tk.RIGHT)
+        tk.Button(
+            pairing_frame,
+            text="重置设备",
+            command=self._reset_pairing,
+            width=10,
+        ).pack(side=tk.RIGHT, padx=(10, 0))
 
         # 日志区域
         log_frame = tk.LabelFrame(parent, text="运行日志", padx=5, pady=5)
@@ -270,7 +279,7 @@ class AppGUI:
         # 接收记录
         tk.Label(parent, text="队列传输 · 背压 · SHA-256 校验", fg="gray").pack(fill=tk.X, padx=10, pady=5)
         
-        self.list_files = tk.Listbox(parent, selectmode=tk.SINGLE, height=10)
+        self.list_files = tk.Listbox(parent, selectmode=tk.SINGLE, height=16)
         self.list_files.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.list_files.bind("<Double-Button-1>", self._on_file_list_double_click)
         
