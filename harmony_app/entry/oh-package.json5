@@ -1,0 +1,7 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "Phone2PC HarmonyOS Client",
+  "license": "MIT",
+  "dependencies": {}
+}

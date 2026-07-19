@@ -4,19 +4,81 @@ import tkinter as tk
 from tkinter import scrolledtext, messagebox, ttk
 import socket
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 import os
 import winreg
 from PIL import Image, ImageDraw
 import pystray
 import json
+import secrets
+import time
+import queue
+import ctypes
+from collections import defaultdict, deque
 
 from server import WebSocketServer
 from input_handler import InputHandler
 from clipboard_manager import ClipboardManager
 from file_manager import FileManager
-import windnd
+from constants import APP_VERSION, MAX_CLIPBOARD_SIZE, MAX_REMOTE_INPUT_SIZE, PROTOCOL_VERSION, SERVER_PORT
+from security import PairingManager, get_app_data_dir
+from windows_drop import WindowsDropTarget
 from tkinter import filedialog
+
+_instance_mutex = None
+_instance_mutex_name = "Local\\Phone2PC-io.github.oooocoooo1"
+_window_title_prefix = "Phone2PC 智连"
+
+
+def _activate_existing_window():
+    """Restore the already-running hidden tray window."""
+    if os.name != "nt":
+        return False
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def enum_window(hwnd, _):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title, length + 1)
+        if title.value.startswith(_window_title_prefix):
+            user32.ShowWindowAsync(hwnd, 9)  # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            found.append(hwnd)
+            return False
+        return True
+
+    user32.EnumWindows(enum_window, 0)
+    return bool(found)
+
+
+def _claim_single_instance():
+    """Return False when another Phone2PC process already owns the mutex."""
+    global _instance_mutex
+    if os.name != "nt":
+        return True
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, _instance_mutex_name)
+    if not handle:
+        return True
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        _activate_existing_window()
+        return False
+    _instance_mutex = handle
+    return True
+
+
+def _release_single_instance():
+    global _instance_mutex
+    if _instance_mutex and os.name == "nt":
+        ctypes.windll.kernel32.CloseHandle(_instance_mutex)
+    _instance_mutex = None
 
 class TextHandler(logging.Handler):
     """用于将日志输出到 Tkinter 文本框"""
@@ -33,10 +95,12 @@ class TextHandler(logging.Handler):
                 self.text_widget.insert(tk.END, msg + '\n')
                 self.text_widget.see(tk.END)
                 self.text_widget.configure(state='disabled')
-            except: pass
+            except tk.TclError:
+                pass
         try:
             self.text_widget.after(0, append)
-        except: pass
+        except tk.TclError:
+            pass
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -44,18 +108,15 @@ def resource_path(relative_path):
         # PyInstaller creates a temp folder and stores path in _MEI
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     return os.path.join(base_path, relative_path)
 
 class AppGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Phone2PC 智连 (v5.2.2)")
+        self.root.title(f"Phone2PC 智连 (v{APP_VERSION})")
         self.root.geometry("500x600")
-        
-        # 启动时最小化到通知区域 (隐藏窗口)
-        self.root.withdraw()
         
         # 设置窗口图标 (Runtime)
         try:
@@ -81,8 +142,15 @@ class AppGUI:
         self.server_thread = None
         self.tray_icon = None
         self.connected_websocket = None 
+        self.authenticated_clients = set()
+        self.auth_challenges = {}
+        self.auth_failures = defaultdict(deque)
+        self.pairing_manager = PairingManager()
         
         self.is_closing = False
+        self._drop_queue = queue.SimpleQueue()
+        self._drop_target = None
+        self._drop_poll_after_id = None
 
         self._init_ui()
         
@@ -91,10 +159,10 @@ class AppGUI:
         # 分步启动
         self.root.after(200, self._init_autorun_state)
         self.root.after(500, self._start_ip_check)
-        self.root.after(1000, self._start_server_safe)
-        self.root.after(1500, self._start_clipboard)
-        self.root.after(2000, self._init_file_manager) # 2s: 初始化文件管理器
-        self.root.after(3000, self._init_tray_safe)
+        self.root.after(700, self._start_clipboard)
+        self.root.after(900, self._init_file_manager)
+        self.root.after(1200, self._start_server_safe)
+        self.root.after(1800, self._init_tray_safe)
 
     def _init_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -133,6 +201,19 @@ class AppGUI:
         cb_autorun = tk.Checkbutton(top_frame, text="开机自启", variable=self.autorun_var, command=self._toggle_autorun)
         cb_autorun.pack(side=tk.RIGHT)
 
+        pairing_frame = tk.Frame(parent)
+        pairing_frame.pack(fill=tk.X, padx=15, pady=(0, 8))
+        tk.Label(pairing_frame, text="配对码:", font=("Arial", 11, "bold")).pack(side=tk.LEFT)
+        self.pairing_code_var = tk.StringVar(value=self.pairing_manager.pairing_code)
+        tk.Label(
+            pairing_frame,
+            textvariable=self.pairing_code_var,
+            font=("Consolas", 15, "bold"),
+            fg="#D84315",
+        ).pack(side=tk.LEFT, padx=8)
+        tk.Label(pairing_frame, text="首次连接时在手机输入", fg="gray").pack(side=tk.LEFT)
+        tk.Button(pairing_frame, text="重置设备", command=self._reset_pairing).pack(side=tk.RIGHT)
+
         # 日志区域
         log_frame = tk.LabelFrame(parent, text="运行日志", padx=5, pady=5)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -142,8 +223,7 @@ class AppGUI:
 
         self._setup_logging()
         
-        # v5.0 Status Label
-        tk.Label(parent, text="v5.0 已就绪 | 二进制+流控", fg="gray").pack(pady=5)
+        tk.Label(parent, text=f"v{APP_VERSION} | 已鉴权 · 校验传输", fg="gray").pack(pady=5)
 
     def _init_clipboard_tab(self, parent):
         # 左右分栏：左边本机历史，右边手机历史
@@ -180,11 +260,17 @@ class AppGUI:
         # 发送按钮
         btn_send = tk.Button(parent, text="选择文件发送", command=self._select_file_to_send, bg="#E1F5FE", height=2)
         btn_send.pack(fill=tk.X, padx=20, pady=5)
-        
+
+        progress_frame = tk.LabelFrame(parent, text="实时传输状态", padx=8, pady=6)
+        progress_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.file_progress_ui = {}
+        self._create_file_progress_row(progress_frame, "send", "发送")
+        self._create_file_progress_row(progress_frame, "receive", "接收")
+
         # 接收记录
-        tk.Label(parent, text="v5.0 已就绪 | 二进制+流控", fg="gray").pack(fill=tk.X, padx=10, pady=5)
+        tk.Label(parent, text="队列传输 · 背压 · SHA-256 校验", fg="gray").pack(fill=tk.X, padx=10, pady=5)
         
-        self.list_files = tk.Listbox(parent, selectmode=tk.SINGLE, height=15)
+        self.list_files = tk.Listbox(parent, selectmode=tk.SINGLE, height=10)
         self.list_files.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.list_files.bind("<Double-Button-1>", self._on_file_list_double_click)
         
@@ -192,52 +278,183 @@ class AppGUI:
         btn_open_dir.pack(fill=tk.X, padx=10, pady=5)
 
     def _init_file_manager(self):
+        download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "Phone2PC")
         self.file_manager = FileManager(
-            save_dir="received_files",
+            save_dir=download_dir,
             send_callback=self._send_raw_json,
             on_receive_complete=self._on_file_received,
-            on_send_complete=self._on_file_sent_success
+            on_send_complete=self._on_file_sent_success,
+            on_send_failed=self._on_file_send_failed,
+            on_transfer_progress=self._on_file_transfer_progress,
+            peer_host_callback=self._get_connected_peer_host,
         )
         # Hook Drag & Drop
         try:
-            windnd.hook_dropfiles(self.root, func=self._on_drop_files)
+            self._drop_target = WindowsDropTarget(self.root, self._on_drop_files)
+            self._schedule_drop_poll()
             logging.info("文件拖拽功能已启用")
         except Exception as e:
             logging.error(f"拖拽初始化失败: {e}")
 
     def _on_drop_files(self, filenames):
-        if not filenames: return
-        # windnd 返回的是 bytes 列表 (Windows ANSI), 需解码? 
-        # 文档说通常是 list of bytes. 
-        # 测试中 windnd 1.0.7 可能返回 bytes. 需处理 decoding.
-        
-        files_to_send = []
-        for f in filenames:
-            if isinstance(f, bytes):
-                f = f.decode("gbk") # Windows 路径通常是 gbk
-            files_to_send.append(f)
-            
-        for f in files_to_send:
-            self._log_file_ui(f"准备发送: {os.path.basename(f)}")
-            self.file_manager.send_file_thread(f)
+        """Native drop callback: enqueue only; never enter Tcl/Tk here."""
+        try:
+            paths = tuple(
+                item.decode("mbcs", errors="replace") if isinstance(item, bytes) else str(item)
+                for item in (filenames or ())
+            )
+            if paths:
+                self._drop_queue.put(paths)
+        except BaseException:
+            # Exceptions escaping a ctypes WNDPROC callback can terminate the process.
+            logging.exception("接收拖拽文件失败")
+
+    def _schedule_drop_poll(self):
+        if not self.is_closing:
+            self._drop_poll_after_id = self.root.after(40, self._poll_drop_queue)
+
+    def _poll_drop_queue(self):
+        self._drop_poll_after_id = None
+        if self.is_closing:
+            return
+        while True:
+            try:
+                filenames = self._drop_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._process_dropped_files(filenames)
+        self._schedule_drop_poll()
+
+    def _process_dropped_files(self, filenames):
+        """Handle dropped files safely from Tk's normal event loop."""
+        if self.is_closing or not filenames:
+            return
+        try:
+            if not self.connected_websocket:
+                logging.info("已忽略拖拽文件：手机尚未连接")
+                self.notebook.select(self.tab_files)
+                self._log_file_ui("未发送：手机尚未连接，请先完成配对并连接")
+                self.root.bell()
+                return
+            if not self.file_manager:
+                self._log_file_ui("未发送：文件传输服务尚未就绪")
+                return
+
+            for filepath in filenames:
+                self._log_file_ui(f"准备发送: {os.path.basename(filepath)}")
+                self.file_manager.send_file_thread(filepath)
+        except Exception:
+            logging.exception("处理拖拽文件失败")
+            try:
+                self._log_file_ui("拖拽文件处理失败，请查看运行日志")
+            except tk.TclError:
+                pass
 
     def _select_file_to_send(self):
+        if not self.connected_websocket:
+            messagebox.showwarning("未连接", "请先完成手机配对并连接")
+            return
         files = filedialog.askopenfilenames()
         if files:
             for f in files:
                 self._log_file_ui(f"准备发送: {os.path.basename(f)}")
                 self.file_manager.send_file_thread(f)
 
-    def _send_raw_json(self, json_str):
+    def _send_raw_json(self, json_str, wait=False):
         """文件管理器使用的底层发送回调"""
-        if self.connected_websocket:
-            asyncio.run_coroutine_threadsafe(self.connected_websocket.send(json_str), self.loop)
+        if not self.connected_websocket or not self.loop or not self.loop.is_running():
+            raise RuntimeError("没有已鉴权的连接")
+        future = asyncio.run_coroutine_threadsafe(self.connected_websocket.send(json_str), self.loop)
+        if wait:
+            return future.result(timeout=30)
+        return future
+
+    def _get_connected_peer_host(self):
+        websocket = self.connected_websocket
+        if not websocket or not websocket.remote_address:
+            return None
+        return websocket.remote_address[0]
 
     def _on_file_received(self, filepath):
         self.root.after(0, lambda: self._log_file_ui(f"已接收: {os.path.basename(filepath)} (双击打开)", filepath))
 
     def _on_file_sent_success(self, filename):
         self.root.after(0, lambda: messagebox.showinfo("发送成功", f"文件 '{filename}' 已成功发送给客户端"))
+
+    def _on_file_send_failed(self, filename, reason):
+        self.root.after(0, lambda: self._log_file_ui(f"发送失败: {filename} ({reason})"))
+
+    def _create_file_progress_row(self, parent, direction, title):
+        frame = tk.Frame(parent)
+        frame.pack(fill=tk.X, pady=3)
+
+        title_var = tk.StringVar(value=f"{title}：空闲")
+        detail_var = tk.StringVar(value="0 B / 0 B · --")
+        progress_var = tk.DoubleVar(value=0.0)
+
+        tk.Label(frame, textvariable=title_var, anchor="w").pack(fill=tk.X)
+        ttk.Progressbar(frame, variable=progress_var, maximum=100).pack(fill=tk.X, pady=(2, 1))
+        tk.Label(frame, textvariable=detail_var, anchor="w", fg="gray").pack(fill=tk.X)
+        self.file_progress_ui[direction] = {
+            "title": title_var,
+            "detail": detail_var,
+            "progress": progress_var,
+            "label": title,
+        }
+
+    def _on_file_transfer_progress(self, event):
+        snapshot = dict(event)
+        self.root.after(0, lambda: self._update_file_transfer_progress(snapshot))
+
+    def _update_file_transfer_progress(self, event):
+        ui = self.file_progress_ui.get(event.get("direction"))
+        if not ui:
+            return
+
+        status_labels = {
+            "waiting": "等待接收端",
+            "sending": "发送中",
+            "receiving": "接收中",
+            "verifying": "校验中",
+            "completed": "已完成",
+            "failed": "失败",
+            "cancelled": "已取消",
+        }
+        status = event.get("status", "")
+        transferred = max(0, int(event.get("transferred", 0)))
+        total = max(0, int(event.get("total", 0)))
+        percent = 100.0 if status == "completed" and total == 0 else (transferred * 100.0 / total if total else 0.0)
+        percent = min(100.0, max(0.0, percent))
+        speed = max(0.0, float(event.get("speed_bps", 0.0)))
+        speed_text = f"{self._format_file_size(speed)}/s" if speed > 0 else "--"
+        name = event.get("name") or "未命名文件"
+        status_text = status_labels.get(status, status or "空闲")
+        message = event.get("message")
+
+        ui["title"].set(f"{ui['label']}：{status_text} · {name}")
+        detail = (
+            f"{self._format_file_size(transferred)} / {self._format_file_size(total)}"
+            f" · {percent:.1f}% · {speed_text}"
+        )
+        if message:
+            detail += f" · {message}"
+        if event.get("transport") == "http":
+            detail += " · HTTP 高速"
+        ui["detail"].set(detail)
+        ui["progress"].set(percent)
+
+    @staticmethod
+    def _format_file_size(byte_count):
+        value = float(byte_count)
+        units = ("B", "KB", "MB", "GB", "TB")
+        unit = units[0]
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                break
+            value /= 1024
+        if unit == "B":
+            return f"{int(value)} {unit}"
+        return f"{value:.1f} {unit}"
 
     def _log_file_ui(self, msg, filepath=None):
         self.list_files.insert(0, msg)
@@ -260,13 +477,15 @@ class AppGUI:
     # ... (Keep existing methods: _init_autorun_state, _start_ip_check, etc.) ...
     
     # Updated message handler
-    def _handle_client_message(self, message, websocket):
-        self.connected_websocket = websocket
-        
-        # v5.0: Binary Frame -> FileManager directly
+    async def _handle_client_message(self, message, websocket):
+        if websocket not in self.authenticated_clients:
+            await self._handle_auth_message(message, websocket)
+            return
+
+        # Binary Frame -> FileManager directly
         if isinstance(message, bytes):
             if self.file_manager:
-                self.file_manager.handle_binary(message)
+                await asyncio.to_thread(self.file_manager.handle_binary, message)
             return
         
         try:
@@ -276,23 +495,97 @@ class AppGUI:
             # 路由：剪贴板消息
             if msg_type == "CLIPBOARD_SYNC":
                 content = data.get("content", "")
-                if content:
-                    self.clipboard_manager.add_phone_history(content)
-                    self.clipboard_manager.set_clipboard(content)  # v5.3: 自动写入PC剪贴板
+                if isinstance(content, str) and 0 < len(content.encode("utf-8")) <= MAX_CLIPBOARD_SIZE:
+                    await asyncio.to_thread(self._apply_phone_clipboard, content)
                     self.root.after(0, lambda: self._update_list("phone"))
                     logging.info("收到手机剪贴板同步，已写入本机剪贴板")
+                elif content:
+                    await websocket.send(json.dumps({"type": "ERROR", "message": "剪贴板内容超出限制"}))
                 return
             
             # 路由：文件消息 (包括 ACK)
-            if msg_type in ["FILE_OFFER", "FILE_DATA", "FILE_END", "ACK"]:
+            if msg_type in ["FILE_OFFER", "FILE_END", "FILE_ACCEPT", "FILE_ACK", "FILE_COMPLETE", "FILE_ERROR", "ACK"]:
                 if self.file_manager:
-                    self.file_manager.handle_message(data)
+                    await asyncio.to_thread(self.file_manager.handle_message, data)
+                return
+            if msg_type is not None:
+                await websocket.send(json.dumps({"type": "ERROR", "message": "未知的协议消息"}))
                 return
         except json.JSONDecodeError:
             pass
 
         # 默认作为文本输入处理
-        threading.Thread(target=self.input_handler.type_text, args=(message,), daemon=True).start()
+        if len(message.encode("utf-8")) > MAX_REMOTE_INPUT_SIZE:
+            await websocket.send(json.dumps({"type": "ERROR", "message": "远程输入内容超出限制"}))
+            return
+        if not self.input_handler.submit_text(message):
+            await websocket.send(json.dumps({"type": "ERROR", "message": "远程输入队列已满"}))
+
+    def _apply_phone_clipboard(self, content):
+        self.clipboard_manager.add_phone_history(content)
+        self.clipboard_manager.set_clipboard(content)
+
+    async def _handle_auth_message(self, message, websocket):
+        peer_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
+        failures = self.auth_failures[peer_ip]
+        now = time.monotonic()
+        while failures and now - failures[0] > 60:
+            failures.popleft()
+        if len(failures) >= 5:
+            await websocket.close(code=1008, reason="too many authentication attempts")
+            return
+        if not isinstance(message, str):
+            await websocket.close(code=1008, reason="authentication required")
+            return
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            await websocket.close(code=1008, reason="authentication required")
+            return
+
+        msg_type = data.get("type")
+        device_id = data.get("device_id")
+        token = None
+        paired = False
+        if msg_type == "AUTH":
+            challenge = self.auth_challenges.get(websocket)
+            if self.pairing_manager.authenticate_challenge(device_id, data.get("response"), challenge):
+                token = True
+        elif msg_type == "PAIR":
+            token = self.pairing_manager.pair(device_id, data.get("code"))
+            paired = token is not None
+
+        if token is None:
+            failures.append(time.monotonic())
+            await websocket.send(json.dumps({"type": "AUTH_ERROR", "message": "配对码或设备令牌无效"}))
+            await asyncio.sleep(0.3)
+            await websocket.close(code=1008, reason="authentication failed")
+            return
+
+        previous = self.connected_websocket
+        if previous and previous != websocket:
+            await previous.close(code=1000, reason="replaced by a new authenticated connection")
+
+        self.authenticated_clients.add(websocket)
+        self.auth_failures.pop(peer_ip, None)
+        self.auth_challenges.pop(websocket, None)
+        self.connected_websocket = websocket
+        response = {
+            "type": "PAIR_SUCCESS" if paired else "AUTH_OK",
+            "version": APP_VERSION,
+            "protocol": PROTOCOL_VERSION,
+        }
+        if paired:
+            response["token"] = token
+            self.root.after(0, lambda: self.pairing_code_var.set(self.pairing_manager.pairing_code))
+        await websocket.send(json.dumps(response))
+        logging.info("设备已通过鉴权: %s", websocket.remote_address)
+
+        pc_history = self.clipboard_manager.get_history("pc") if self.clipboard_manager else []
+        if pc_history:
+            latest = pc_history[0]
+            if latest and len(latest.encode("utf-8")) <= MAX_CLIPBOARD_SIZE:
+                await websocket.send(json.dumps({"type": "CLIPBOARD_SYNC", "source": "PC", "content": latest}))
 
     def _init_autorun_state(self):
         try:
@@ -302,9 +595,7 @@ class AppGUI:
             logging.error(f"注册表读取失败: {e}")
 
     def _start_ip_check(self):
-        try: 
-            threading.Thread(target=self._update_ip_display, daemon=True).start()
-        except: pass
+        threading.Thread(target=self._update_ip_display, daemon=True).start()
 
     def _start_server_safe(self):
         try: 
@@ -324,6 +615,9 @@ class AppGUI:
             logging.info("托盘图标已加载")
         except Exception as e:
             logging.error(f"托盘启动失败: {e}")
+            # Do not leave the application permanently invisible when tray
+            # integration isn't available.
+            self.root.deiconify()
 
     def _init_tray(self):
         try:
@@ -354,45 +648,84 @@ class AppGUI:
     def _on_close_click(self):
         self.root.withdraw()
 
+    def _reset_pairing(self):
+        if not messagebox.askyesno("重置已配对设备", "所有手机都需要重新输入配对码，是否继续？"):
+            return
+        self.pairing_manager.reset_trusted_devices()
+        self.pairing_code_var.set(self.pairing_manager.pairing_code)
+        if self.connected_websocket and self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.connected_websocket.close(code=1000, reason="trusted devices reset"), self.loop
+            )
+        logging.info("已重置所有受信任设备")
+
     def _quit_app(self, icon=None, item=None):
         self.is_closing = True
         if self.tray_icon: self.tray_icon.stop()
         self.root.after(0, self._destroy_app)
 
     def _destroy_app(self):
+        if self._drop_poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._drop_poll_after_id)
+            except tk.TclError:
+                pass
+            self._drop_poll_after_id = None
+        if self._drop_target:
+            self._drop_target.close()
+            self._drop_target = None
         if self.clipboard_manager: self.clipboard_manager.stop()
-        if self.loop: self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.input_handler: self.input_handler.stop()
+        if self.file_manager: self.file_manager.stop()
+        if self.loop and self.loop.is_running() and self.server:
+            try:
+                asyncio.run_coroutine_threadsafe(self.server.stop(), self.loop).result(timeout=3)
+            except Exception as e:
+                logging.warning(f"关闭服务时出现异常: {e}")
+        if self.server_thread and self.server_thread.is_alive():
+            self.server_thread.join(timeout=3)
         self.root.destroy()
-        sys.exit(0)
 
     def _setup_logging(self):
         handler = TextHandler(self.log_text)
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S')
         handler.setFormatter(formatter)
-        logging.getLogger().addHandler(handler)
-        logging.getLogger().setLevel(logging.INFO)
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
+        try:
+            log_dir = get_app_data_dir() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_dir / "phone2pc.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+            )
+            file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+            root_logger.addHandler(file_handler)
+        except OSError:
+            pass
+        root_logger.setLevel(logging.INFO)
 
     def _check_autorun(self):
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
-            winreg.QueryValueEx(key, "Phone2PC")
-            winreg.CloseKey(key)
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as key:
+                winreg.QueryValueEx(key, "Phone2PC")
             return True
-        except: return False
+        except OSError:
+            return False
 
     def _toggle_autorun(self):
-        app_path = sys.executable 
         if getattr(sys, 'frozen', False): target = sys.executable
         else: target = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-            if self.autorun_var.get():
-                winreg.SetValueEx(key, "Phone2PC", 0, winreg.REG_SZ, target)
-                logging.info("已开启开机自启")
-            else:
-                try: winreg.DeleteValue(key, "Phone2PC"); logging.info("已关闭开机自启")
-                except: pass
-            winreg.CloseKey(key)
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as key:
+                if self.autorun_var.get():
+                    winreg.SetValueEx(key, "Phone2PC", 0, winreg.REG_SZ, target)
+                    logging.info("已开启开机自启")
+                else:
+                    try:
+                        winreg.DeleteValue(key, "Phone2PC")
+                    except FileNotFoundError:
+                        pass
+                    logging.info("已关闭开机自启")
         except Exception as e:
             logging.error(f"设置开机自启失败: {e}")
             self.autorun_var.set(not self.autorun_var.get())
@@ -405,16 +738,18 @@ class AppGUI:
     def _on_pc_clipboard_change(self, text):
         # PC 剪贴板变化 -> 更新 UI -> 发送给手机
         self.root.after(0, lambda: self._update_list("pc"))
-        if self.connected_websocket:
+        if self.connected_websocket and len(text.encode("utf-8")) <= MAX_CLIPBOARD_SIZE:
             msg = json.dumps({"type": "CLIPBOARD_SYNC", "source": "PC", "content": text})
             asyncio.run_coroutine_threadsafe(self.connected_websocket.send(msg), self.loop)
+        elif len(text.encode("utf-8")) > MAX_CLIPBOARD_SIZE:
+            logging.warning("剪贴板内容超过 256 KiB，已跳过同步")
 
     def _update_list(self, type_):
         if type_ == "pc":
-            data = self.clipboard_manager.pc_history
+            data = self.clipboard_manager.get_history("pc")
             lb = self.list_pc
         else:
-            data = self.clipboard_manager.phone_history
+            data = self.clipboard_manager.get_history("phone")
             lb = self.list_phone
         
         lb.delete(0, tk.END)
@@ -425,20 +760,22 @@ class AppGUI:
     def _on_pc_list_click(self, event):
         idx = self.list_pc.curselection()
         if idx:
-            text = self.clipboard_manager.pc_history[idx[0]]
-            self.clipboard_manager.set_clipboard(text)
-            logging.info("已复制 PC 历史记录")
+            history = self.clipboard_manager.get_history("pc")
+            if idx[0] < len(history):
+                self.clipboard_manager.set_clipboard(history[idx[0]])
+                logging.info("已复制 PC 历史记录")
 
     def _on_phone_list_click(self, event):
         idx = self.list_phone.curselection()
         if idx:
-            text = self.clipboard_manager.phone_history[idx[0]]
-            self.clipboard_manager.set_clipboard(text) # 设置本机剪贴板
-            logging.info("已复制手机历史到本机")
+            history = self.clipboard_manager.get_history("phone")
+            if idx[0] < len(history):
+                self.clipboard_manager.set_clipboard(history[idx[0]])
+                logging.info("已复制手机历史到本机")
 
     def _clear_list(self, type_):
-        if type_ == "pc": self.clipboard_manager.pc_history.clear(); self._update_list("pc")
-        else: self.clipboard_manager.phone_history.clear(); self._update_list("phone")
+        self.clipboard_manager.clear_history(type_)
+        self._update_list(type_)
 
     def _update_ip_display(self):
         ip = self._get_local_ip()
@@ -448,7 +785,8 @@ class AppGUI:
                 self.ip_entry.delete(0, tk.END)
                 self.ip_entry.insert(0, ip)
                 self.ip_entry.configure(state='readonly')
-            except: pass
+            except tk.TclError:
+                pass
         self.root.after(0, update)
 
     def _get_local_ip(self):
@@ -458,20 +796,27 @@ class AppGUI:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             p = subprocess.Popen(["powershell", "-Command", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, startupinfo=startupinfo)
-            out, err = p.communicate(timeout=3)
+            out, _ = p.communicate(timeout=3)
             ip = out.strip()
             if ip: return ip
-        except: pass
+        except (OSError, subprocess.SubprocessError):
+            pass
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close(); return ip
-        except: return "127.0.0.1"
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(1)
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
 
     def _start_server(self):
-        self.input_handler = InputHandler()
+        if not self.clipboard_manager or not self.file_manager:
+            raise RuntimeError("剪贴板或文件服务尚未初始化")
+        self.input_handler = InputHandler(clipboard_manager=self.clipboard_manager)
         # 传入 on_connect_callback 和 on_disconnect_callback
         self.server = WebSocketServer(
             host="0.0.0.0", 
-            port=8765, 
+            port=SERVER_PORT,
             on_message_callback=self._handle_client_message,
             on_connect_callback=self._on_new_client_connected,
             on_disconnect_callback=self._on_client_disconnected
@@ -482,40 +827,46 @@ class AppGUI:
     def _run_asyncio_loop(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self.server.start())
+        try:
+            self.loop.run_until_complete(self.server.start())
+        except Exception:
+            logging.exception("WebSocket 服务异常退出")
+        finally:
+            self.loop.close()
 
     async def _on_new_client_connected(self, websocket):
-        self.connected_websocket = websocket
-        logging.info(f"新设备已连接: {websocket.remote_address}")
-        
-        # 增加延迟，避免连接握手期并发冲突 (Fix for v3.6)
-        await asyncio.sleep(0.5)
-
-        # 握手确认 (v5.2)
-        try:
-            await websocket.send(json.dumps({"type": "WELCOME", "version": "v5.2"}))
-        except: pass
-
-        # 连接建立时，立即推送最新一条 PC 剪贴板历史
-        try:
-            if self.clipboard_manager and self.clipboard_manager.pc_history:
-                # 获取最新一条，注意线程安全（列表读取通常是原子的，但为了保险起见...）
-                # 这里只读，冲突风险极低
-                latest = self.clipboard_manager.pc_history[0]
-                if latest:
-                    msg = json.dumps({"type": "CLIPBOARD_SYNC", "source": "PC", "content": latest})
-                    await websocket.send(msg)
-                    logging.info("已向新连接推送最新剪贴板内容")
-        except Exception as e:
-            logging.error(f"推送剪贴板失败: {e}")
+        logging.info(f"新设备请求连接: {websocket.remote_address}")
+        challenge = secrets.token_hex(16)
+        self.auth_challenges[websocket] = challenge
+        await websocket.send(json.dumps({
+            "type": "AUTH_REQUIRED",
+            "version": APP_VERSION,
+            "protocol": PROTOCOL_VERSION,
+            "challenge": challenge,
+        }))
+        async def expire_unauthenticated():
+            await asyncio.sleep(10)
+            if websocket not in self.authenticated_clients:
+                await websocket.close(code=1008, reason="authentication timeout")
+        asyncio.create_task(expire_unauthenticated())
 
     async def _on_client_disconnected(self, websocket):
         logging.warning(f"设备已断开: {websocket.remote_address}")
+        self.authenticated_clients.discard(websocket)
+        self.auth_challenges.pop(websocket, None)
         if self.connected_websocket == websocket:
             self.connected_websocket = None
+            if self.file_manager:
+                self.file_manager.abort_all()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AppGUI(root)
-    if "--minimized" in sys.argv: root.withdraw()
-    root.mainloop()
+    if not _claim_single_instance():
+        raise SystemExit(0)
+    try:
+        root = tk.Tk()
+        app = AppGUI(root)
+        if "--minimized" in sys.argv:
+            root.withdraw()
+        root.mainloop()
+    finally:
+        _release_single_instance()

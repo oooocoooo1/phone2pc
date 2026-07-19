@@ -14,7 +14,8 @@
     </style>
 </head>
 <body>
-    <h2>WebSocket 连接测试</h2>
+    <h2>WebSocket 安全策略测试</h2>
+    <p>v5.4 起，服务端只接受无浏览器 Origin 的原生客户端。本页面连接失败属于预期行为，可用于确认浏览器来源已被拒绝。完整连通性测试请运行 <code>python pc_server/connection_test.py --code 配对码</code>。</p>
     <p>请输入 PC 的 IP 地址进行测试：</p>
     <div>
         <input type="text" id="ipInput" placeholder="例如 192.168.1.100" value="localhost">

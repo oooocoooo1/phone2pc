@@ -3,8 +3,10 @@ import time
 import logging
 import pyperclip
 
+from constants import MAX_CLIPBOARD_SIZE
+
 class ClipboardManager:
-    def __init__(self, on_clipboard_change=None, max_history=200):
+    def __init__(self, on_clipboard_change=None, max_history=100):
         """
         :param on_clipboard_change: 当本机剪贴板变化时的回调 func(text)
         """
@@ -17,33 +19,44 @@ class ClipboardManager:
         self._running = False
         self._last_content = ""
         self._lock = threading.Lock()
+        self._worker = None
 
     def start(self):
         self._running = True
-        self._last_content = self._get_clipboard_safe()
-        threading.Thread(target=self._monitor_loop, daemon=True).start()
+        with self._lock:
+            self._last_content = self._get_clipboard_safe()
+        self._worker = threading.Thread(target=self._monitor_loop, name="clipboard-monitor", daemon=True)
+        self._worker.start()
 
     def stop(self):
         self._running = False
+        if self._worker and self._worker is not threading.current_thread():
+            self._worker.join(timeout=2)
+        self._worker = None
 
     def _get_clipboard_safe(self):
         try:
             return pyperclip.paste()
-        except:
+        except Exception:
             return ""
 
     def _monitor_loop(self):
         """轮询本机剪贴板"""
         while self._running:
             current = self._get_clipboard_safe()
-            if current and current != self._last_content:
-                self._last_content = current
+            with self._lock:
+                changed = bool(current) and current != self._last_content
+                if changed:
+                    self._last_content = current
+            if changed:
                 self.add_pc_history(current)
                 if self.on_clipboard_change:
                     self.on_clipboard_change(current)
             time.sleep(1.0) # 1秒轮询一次
 
     def add_pc_history(self, text):
+        if len(text.encode("utf-8")) > MAX_CLIPBOARD_SIZE:
+            return
         with self._lock:
             # 去重：如果已存在，先移除
             if text in self.pc_history:
@@ -53,6 +66,8 @@ class ClipboardManager:
                 self.pc_history.pop()
 
     def add_phone_history(self, text):
+        if len(text.encode("utf-8")) > MAX_CLIPBOARD_SIZE:
+            return
         with self._lock:
             if text in self.phone_history:
                 self.phone_history.remove(text)
@@ -70,10 +85,21 @@ class ClipboardManager:
             if 0 <= index < len(self.phone_history):
                 del self.phone_history[index]
 
+    def get_history(self, source):
+        with self._lock:
+            history = self.pc_history if source == "pc" else self.phone_history
+            return list(history)
+
+    def clear_history(self, source):
+        with self._lock:
+            history = self.pc_history if source == "pc" else self.phone_history
+            history.clear()
+
     def set_clipboard(self, text):
         """将文本写入本机剪贴板 (不会触发 monitor 回调，需要处理循环更新问题)"""
         try:
-            self._last_content = text # 更新 last，避免死循环触发 on_change
+            with self._lock:
+                self._last_content = text # 更新 last，避免死循环触发 on_change
             pyperclip.copy(text)
         except Exception as e:
             logging.error(f"Failed to set clipboard: {e}")

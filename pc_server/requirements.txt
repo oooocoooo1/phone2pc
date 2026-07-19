@@ -1,5 +1,5 @@
-pyperclip
-pyautogui
-pystray
-Pillow
-pyinstaller
+websockets>=13,<17
+pyperclip>=1.8.2,<2
+pyautogui>=0.9.54,<1
+pystray>=0.19.5,<1
+Pillow>=10,<13

@@ -1,6 +1,9 @@
 import asyncio
 import websockets
 import logging
+import inspect
+
+from constants import MAX_MESSAGE_SIZE
 
 class WebSocketServer:
     def __init__(self, host="0.0.0.0", port=8765, on_message_callback=None, on_connect_callback=None, on_disconnect_callback=None):
@@ -16,34 +19,34 @@ class WebSocketServer:
         self.on_connect_callback = on_connect_callback
         self.on_disconnect_callback = on_disconnect_callback
         self.clients = set()
+        self._stop_event = None
 
     async def register(self, websocket):
         self.clients.add(websocket)
         logging.info(f"新客户端连接: {websocket.remote_address}")
 
     async def unregister(self, websocket):
-        self.clients.remove(websocket)
+        self.clients.discard(websocket)
         logging.info(f"客户端断开: {websocket.remote_address}")
         if self.on_disconnect_callback:
             try:
-                import inspect
-                if inspect.iscoroutinefunction(self.on_disconnect_callback):
-                    await self.on_disconnect_callback(websocket)
-                else:
-                    self.on_disconnect_callback(websocket)
+                result = self.on_disconnect_callback(websocket)
+                if inspect.isawaitable(result):
+                    await result
             except Exception as e:
                 logging.error(f"Disconnect callback failed: {e}")
 
     async def handle_client(self, websocket):
+        if len(self.clients) >= 8:
+            await websocket.close(code=1013, reason="too many connections")
+            return
         await self.register(websocket)
         # 新连接建立，触发回调 (例如发送当前剪贴板)
         if self.on_connect_callback:
             try:
-                import inspect
-                if inspect.iscoroutinefunction(self.on_connect_callback):
-                    await self.on_connect_callback(websocket)
-                else:
-                    self.on_connect_callback(websocket)
+                result = self.on_connect_callback(websocket)
+                if inspect.isawaitable(result):
+                    await result
             except Exception as e:
                 logging.error(f"Connect callback failed: {e}")
 
@@ -52,42 +55,22 @@ class WebSocketServer:
                 if isinstance(message, bytes):
                     # Binary Frame (File Data)
                     if self.on_message_callback:
-                         # Compat with async/sync
-                        import inspect
-                        if inspect.iscoroutinefunction(self.on_message_callback):
-                            await self.on_message_callback(message, websocket)
-                        else:
-                            res = self.on_message_callback(message, websocket)
-                            if inspect.isawaitable(res):
-                                await res
+                        result = self.on_message_callback(message, websocket)
+                        if inspect.isawaitable(result):
+                            await result
                     continue
 
-                # Text Frame (JSON)
-                # 简单判断：如果以 '{' 开头认为是 JSON，否则作为普通文本输入
-                if message.startswith('{') and '"type":' in message:
-                    # 尝试解析 type 以优化日志
-                    try:
-                         # 快速检查是否是 FILE_DATA (避免解析大 JSON)
-                         if '"type": "FILE_DATA"' in message or '"type":"FILE_DATA"' in message:
-                             logging.info("收到文件数据块...")
-                         else:
-                             logging.info(f"收到消息: {message[:50]}...")
-                    except:
-                        logging.info(f"收到消息: {message[:50]}...")
-                else:
-                    logging.info(f"收到消息: {message[:50]}...") # 避免日志过长
+                # Never log clipboard or remote-input contents.
+                logging.debug("收到文本消息: %d bytes", len(message.encode("utf-8")))
                 
                 if self.on_message_callback:
-                    # 兼容同步和异步回调
-                    import inspect
-                    if inspect.iscoroutinefunction(self.on_message_callback):
-                        await self.on_message_callback(message, websocket)
-                    else:
-                        res = self.on_message_callback(message, websocket)
-                        if inspect.isawaitable(res):
-                            await res
+                    result = self.on_message_callback(message, websocket)
+                    if inspect.isawaitable(result):
+                        await result
         except websockets.exceptions.ConnectionClosed:
             pass
+        except Exception:
+            logging.exception("处理客户端消息失败")
         finally:
             await self.unregister(websocket)
 
@@ -110,18 +93,33 @@ class WebSocketServer:
 
     async def start(self):
         logging.info(f"启动 WebSocket 服务器于 ws://{self.host}:{self.port}")
-        # ping_interval=None: 禁用服务端主动 Ping，避免在传输大量数据阻塞时因未及时 Ping 而断连
-        # ping_timeout=None: 禁用超时检测
-        # max_size=None: 取消单条消息大小限制 (默认是 1MB，传 Base64 图片很容易超)
+        self._stop_event = asyncio.Event()
         async with websockets.serve(
             self.handle_client, 
             self.host, 
             self.port,
-            ping_interval=None, 
-            ping_timeout=None,
-            max_size=None 
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=MAX_MESSAGE_SIZE,
+            max_queue=16,
+            write_limit=2 * 1024 * 1024,
+            # File data is already compressed in most real workloads. Deflate
+            # costs CPU and was the main throughput bottleneck.
+            compression=None,
+            origins=[None],
         ):
-            await asyncio.Future()  # run forever
+            await self._stop_event.wait()
+
+    async def stop(self):
+        if self._stop_event is None:
+            return
+        clients = list(self.clients)
+        if clients:
+            await asyncio.gather(
+                *(client.close(code=1001, reason="server shutdown") for client in clients),
+                return_exceptions=True,
+            )
+        self._stop_event.set()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

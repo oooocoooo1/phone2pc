@@ -6,6 +6,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 .env
 
 # Flutter / Android
@@ -27,3 +28,4 @@ dist/
 received_files/
 pc_server/received_files/
 input_log.txt
+*.part
