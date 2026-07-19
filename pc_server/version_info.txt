@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(5, 5, 2, 0),
-    prodvers=(5, 5, 2, 0),
+    filevers=(5, 5, 3, 0),
+    prodvers=(5, 5, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Phone2PC'),
           StringStruct('FileDescription', 'Phone2PC PC Server'),
-          StringStruct('FileVersion', '5.5.2.0'),
+          StringStruct('FileVersion', '5.5.3.0'),
           StringStruct('InternalName', 'phone2pc'),
           StringStruct('LegalCopyright', 'Copyright (c) 2026 Phone2PC contributors'),
           StringStruct('OriginalFilename', 'phone2pc.exe'),
           StringStruct('ProductName', 'Phone2PC'),
-          StringStruct('ProductVersion', '5.5.2'),
+          StringStruct('ProductVersion', '5.5.3'),
         ],
       )
     ]),

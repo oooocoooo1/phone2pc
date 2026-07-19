@@ -1,7 +1,7 @@
 name: phone2pc_client
 description: Android client for Phone2PC input system.
 publish_to: 'none'
-version: 5.7.3+9
+version: 5.7.4+10
 
 environment:
   sdk: ">=3.10.1 <4.0.0"

@@ -5,10 +5,12 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
 import java.io.BufferedInputStream
@@ -28,16 +30,31 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private val channelName = "io.github.oooocoooo1.phone2pc/channel"
     private val fastChannelName = "io.github.oooocoooo1.phone2pc/fast_transfer"
+    private val shareChannelName = "io.github.oooocoooo1.phone2pc/share_intent"
     private val uploadExecutor = Executors.newSingleThreadExecutor()
+    private val shareExecutor = Executors.newSingleThreadExecutor()
     private val uploadRunning = AtomicBoolean(false)
     private val uploadCancelled = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var uploadConnection: HttpURLConnection? = null
+    private var shareChannel: MethodChannel? = null
+    private val pendingShares = ArrayDeque<Map<String, Any?>>()
 
     override fun provideFlutterEngine(context: Context): FlutterEngine? =
         FlutterEngineCache.getInstance().get(Phone2PCApplication.ENGINE_ID)
 
     override fun shouldDestroyEngineWithHost(): Boolean = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        handleShareIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShareIntent(intent)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -78,12 +95,31 @@ class MainActivity : FlutterActivity() {
                     val uri = call.argument<String>("uri")
                     result.success(persistUriPermission(uri))
                 }
+                "cacheSharedUri" -> {
+                    cacheSharedUri(
+                        call.argument<String>("uri"),
+                        call.argument<String>("name"),
+                        result,
+                    )
+                }
                 "openParentDirectory" -> {
                     val path = call.argument<String>("path")
                     val uri = call.argument<String>("uri")
                     result.success(openParentDirectory(path, uri))
                 }
                 else -> result.notImplemented()
+            }
+        }
+
+        shareChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            shareChannelName,
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getPendingShares" -> result.success(drainPendingShares())
+                    else -> result.notImplemented()
+                }
             }
         }
 
@@ -105,7 +141,147 @@ class MainActivity : FlutterActivity() {
         uploadCancelled.set(true)
         uploadConnection?.disconnect()
         uploadExecutor.shutdownNow()
+        shareExecutor.shutdownNow()
+        shareChannel = null
         super.onDestroy()
+    }
+
+    private fun handleShareIntent(incomingIntent: Intent?) {
+        val action = incomingIntent?.action ?: return
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
+
+        val payload = buildSharePayload(incomingIntent)
+        if ((payload["text"] as? String).isNullOrEmpty() &&
+            (payload["files"] as? List<*>)?.isEmpty() != false
+        ) {
+            return
+        }
+
+        // Do not process the same launch intent again after configuration
+        // changes recreate the Activity.
+        incomingIntent.action = null
+        val channel = shareChannel
+        if (channel == null) {
+            synchronized(pendingShares) { pendingShares.addLast(payload) }
+        } else {
+            channel.invokeMethod("shareReceived", payload)
+        }
+    }
+
+    private fun buildSharePayload(incomingIntent: Intent): Map<String, Any?> {
+        val uris = sharedUris(incomingIntent)
+        val files = uris.map { uri -> sharedUriMetadata(uri, incomingIntent.type) }
+        return mapOf(
+            "text" to incomingIntent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString(),
+            "files" to files,
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sharedUris(incomingIntent: Intent): List<Uri> {
+        return if (incomingIntent.action == Intent.ACTION_SEND_MULTIPLE) {
+            incomingIntent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                ?.filterNotNull()
+                .orEmpty()
+        } else {
+            listOfNotNull(incomingIntent.getParcelableExtra(Intent.EXTRA_STREAM))
+        }
+    }
+
+    private fun sharedUriMetadata(uri: Uri, fallbackMime: String?): Map<String, Any?> {
+        var displayName = uri.lastPathSegment?.substringAfterLast('/') ?: "shared-file"
+        var size = -1L
+        try {
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIndex >= 0 && !cursor.isNull(nameIndex)) {
+                        displayName = cursor.getString(nameIndex)
+                    }
+                    if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                        size = cursor.getLong(sizeIndex)
+                    }
+                }
+            }
+        } catch (error: RuntimeException) {
+            Log.w("Phone2PC", "Unable to inspect shared URI", error)
+        }
+        return mapOf(
+            "uri" to uri.toString(),
+            "name" to displayName,
+            "size" to size,
+            "mime" to (contentResolver.getType(uri) ?: fallbackMime ?: "*/*"),
+        )
+    }
+
+    private fun drainPendingShares(): List<Map<String, Any?>> =
+        synchronized(pendingShares) {
+            buildList {
+                while (pendingShares.isNotEmpty()) add(pendingShares.removeFirst())
+            }
+        }
+
+    private fun cacheSharedUri(
+        rawUri: String?,
+        requestedName: String?,
+        result: MethodChannel.Result,
+    ) {
+        if (rawUri.isNullOrBlank()) {
+            result.error("INVALID_URI", "分享文件地址为空", null)
+            return
+        }
+        shareExecutor.execute {
+            try {
+                val uri = Uri.parse(rawUri)
+                val safeName = sanitizeSharedFileName(requestedName)
+                val sharedCache = File(cacheDir, "shared_send").apply { mkdirs() }
+                sharedCache.listFiles()
+                    ?.filter { System.currentTimeMillis() - it.lastModified() > 24 * 60 * 60 * 1000L }
+                    ?.forEach { it.delete() }
+                val cachedFile = File(
+                    sharedCache,
+                    "${System.currentTimeMillis()}-${System.nanoTime()}-$safeName",
+                )
+                val input = contentResolver.openInputStream(uri)
+                    ?: throw IllegalArgumentException("无法读取分享文件")
+                input.use { source ->
+                    cachedFile.outputStream().buffered(1024 * 1024).use { target ->
+                        source.copyTo(target, 1024 * 1024)
+                    }
+                }
+                val response = mapOf(
+                    "path" to cachedFile.absolutePath,
+                    "name" to safeName,
+                    "size" to cachedFile.length(),
+                    "uri" to rawUri,
+                )
+                mainHandler.post { result.success(response) }
+            } catch (error: Exception) {
+                mainHandler.post {
+                    result.error(
+                        "SHARE_CACHE_FAILED",
+                        error.message ?: "无法读取分享文件",
+                        null,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun sanitizeSharedFileName(rawName: String?): String {
+        val cleaned = rawName
+            ?.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_")
+            ?.trim()
+            ?.take(180)
+            .orEmpty()
+        return cleaned.ifEmpty { "shared-file" }
     }
 
     private fun startFastUpload(

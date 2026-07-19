@@ -40,7 +40,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '智连 (v5.7.3)',
+      title: '智连 (v5.7.4)',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
@@ -67,6 +67,9 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   );
   static const _connectionControlChannel = MethodChannel(
     'io.github.oooocoooo1.phone2pc/connection_control',
+  );
+  static const _shareIntentChannel = MethodChannel(
+    'io.github.oooocoooo1.phone2pc/share_intent',
   );
 
   Future<void> _minimizeApp() async {
@@ -121,9 +124,13 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _connectionControlChannel.setMethodCallHandler(_handleConnectionControl);
+    _shareIntentChannel.setMethodCallHandler(_handleShareIntentCall);
     _loadIpHistory();
     _restorePersistentConnection();
     _initNotifications(); // v5.3
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_loadPendingShares());
+    });
     // 启动剪贴板轮询 (每2秒检查一次)
     _clipboardTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
       if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
@@ -221,6 +228,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     _reconnectTimer?.cancel();
     unawaited(_closeChannel(_channel));
     _connectionControlChannel.setMethodCallHandler(null);
+    _shareIntentChannel.setMethodCallHandler(null);
     _ipController.dispose();
     _pairingCodeController.dispose();
     _textController.dispose();
@@ -243,6 +251,70 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       await _disconnect(status: '已从通知栏主动断开');
     }
     return null;
+  }
+
+  Future<dynamic> _handleShareIntentCall(MethodCall call) async {
+    if (call.method == 'shareReceived' && call.arguments is Map) {
+      await _handleSharedPayload(
+        Map<Object?, Object?>.from(call.arguments as Map),
+      );
+    }
+    return null;
+  }
+
+  Future<void> _loadPendingShares() async {
+    try {
+      final pending = await _shareIntentChannel.invokeListMethod<dynamic>(
+        'getPendingShares',
+      );
+      if (pending == null) return;
+      for (final payload in pending) {
+        if (payload is Map) {
+          await _handleSharedPayload(Map<Object?, Object?>.from(payload));
+        }
+      }
+    } on MissingPluginException {
+      // Sharing is Android-only; other platforms do not expose this channel.
+    } catch (error) {
+      debugPrint('Unable to load pending shares: $error');
+    }
+  }
+
+  Future<void> _handleSharedPayload(Map<Object?, Object?> payload) async {
+    if (!mounted) return;
+    final files = payload['files'] is List
+        ? List<dynamic>.from(payload['files'] as List)
+        : <dynamic>[];
+    final text = payload['text']?.toString() ?? '';
+    if (files.isEmpty && text.isEmpty) return;
+
+    if (!_isConnected) {
+      setState(() => _selectedIndex = 0);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('尚未连接 PC，请连接后重新分享')));
+      return;
+    }
+
+    if (files.isNotEmpty) {
+      setState(() => _selectedIndex = 2);
+      try {
+        await _fileTransferKey.currentState?.sendSharedFiles(files);
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('分享发送失败：$error')));
+        }
+      }
+      return;
+    }
+
+    if (_sendText(text) && mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('分享内容已发送到 PC')));
+    }
   }
 
   Future<void> _restorePersistentConnection() async {
@@ -586,16 +658,29 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       return;
     }
     final message = _textController.text;
-    if (message.isNotEmpty) {
-      if (utf8.encode(message).length > maxRemoteInputBytes) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text("输入内容不能超过 64 KiB")));
-        return;
-      }
-      _channel?.sink.add(message);
-      _addToSentTextHistory(message);
+    if (_sendText(message)) {
       _textController.clear();
+    }
+  }
+
+  bool _sendText(String message) {
+    if (message.isEmpty) return false;
+    if (!_isConnected || _channel == null) return false;
+    if (utf8.encode(message).length > maxRemoteInputBytes) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("输入内容不能超过 64 KiB")));
+      return false;
+    }
+    try {
+      _channel!.sink.add(message);
+      _addToSentTextHistory(message);
+      return true;
+    } catch (error) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('发送失败：$error')));
+      return false;
     }
   }
 

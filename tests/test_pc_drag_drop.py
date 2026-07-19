@@ -2,6 +2,7 @@ import sys
 import queue
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pc_server"))
@@ -39,6 +40,17 @@ class _FakeFileManager:
 
 
 class PcDragDropTests(unittest.TestCase):
+    def test_autorun_command_starts_hidden_in_tray(self):
+        executable = r"D:\Apps\Phone2PC\phone2pc.exe"
+        with patch.object(sys, "frozen", True, create=True), patch.object(
+            sys,
+            "executable",
+            executable,
+        ):
+            command = AppGUI._autorun_command()
+
+        self.assertEqual(command, f'"{executable}" --minimized')
+
     def test_native_callback_defers_all_processing(self):
         gui = AppGUI.__new__(AppGUI)
         gui.root = _FakeRoot()

@@ -56,7 +56,7 @@ def _activate_existing_window():
     return bool(found)
 
 
-def _claim_single_instance():
+def _claim_single_instance(activate_existing=True):
     """Return False when another Phone2PC process already owns the mutex."""
     global _instance_mutex
     if os.name != "nt":
@@ -68,7 +68,8 @@ def _claim_single_instance():
         return True
     if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         kernel32.CloseHandle(handle)
-        _activate_existing_window()
+        if activate_existing:
+            _activate_existing_window()
         return False
     _instance_mutex = handle
     return True
@@ -600,6 +601,8 @@ class AppGUI:
         try:
             is_auto = self._check_autorun()
             self.autorun_var.set(is_auto)
+            if is_auto:
+                self._ensure_autorun_command()
         except Exception as e:
             logging.error(f"注册表读取失败: {e}")
 
@@ -721,9 +724,27 @@ class AppGUI:
         except OSError:
             return False
 
+    @staticmethod
+    def _autorun_command():
+        if getattr(sys, 'frozen', False):
+            return f'"{sys.executable}" --minimized'
+        return f'"{sys.executable}" "{os.path.abspath(__file__)}" --minimized'
+
+    def _ensure_autorun_command(self):
+        expected = self._autorun_command()
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE,
+        ) as key:
+            current, _ = winreg.QueryValueEx(key, "Phone2PC")
+            if current != expected:
+                winreg.SetValueEx(key, "Phone2PC", 0, winreg.REG_SZ, expected)
+                logging.info("已更新开机自启配置，将自动进入托盘")
+
     def _toggle_autorun(self):
-        if getattr(sys, 'frozen', False): target = sys.executable
-        else: target = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        target = self._autorun_command()
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as key:
                 if self.autorun_var.get():
@@ -869,13 +890,14 @@ class AppGUI:
                 self.file_manager.abort_all()
 
 if __name__ == "__main__":
-    if not _claim_single_instance():
+    minimized_start = "--minimized" in sys.argv
+    if not _claim_single_instance(activate_existing=not minimized_start):
         raise SystemExit(0)
     try:
         root = tk.Tk()
-        app = AppGUI(root)
-        if "--minimized" in sys.argv:
+        if minimized_start:
             root.withdraw()
+        app = AppGUI(root)
         root.mainloop()
     finally:
         _release_single_instance()

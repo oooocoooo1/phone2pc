@@ -197,6 +197,56 @@ class FileTransferPageState extends State<FileTransferPage> {
     }
   }
 
+  Future<void> sendSharedFiles(List<dynamic> sharedFiles) async {
+    if (_sendingFileId != null) {
+      throw StateError('已有文件正在发送，请稍后重新分享');
+    }
+
+    for (final rawFile in sharedFiles) {
+      if (rawFile is! Map) continue;
+      final uri = rawFile['uri']?.toString();
+      final name = rawFile['name']?.toString();
+      if (uri == null || uri.isEmpty) continue;
+
+      File? cachedFile;
+      try {
+        final prepared = await _platformChannel
+            .invokeMethod<Map<Object?, Object?>>('cacheSharedUri', {
+              'uri': uri,
+              'name': name,
+            });
+        final path = prepared?['path']?.toString();
+        final preparedName = prepared?['name']?.toString();
+        final rawSize = prepared?['size'];
+        if (path == null ||
+            path.isEmpty ||
+            preparedName == null ||
+            rawSize is! num) {
+          throw StateError('无法读取分享文件');
+        }
+
+        cachedFile = File(path);
+        await _sendFile(
+          cachedFile,
+          preparedName,
+          rawSize.toInt(),
+          sourceUri: uri,
+        );
+      } catch (error) {
+        _log('❌ 分享发送失败: ${name ?? uri}, $error');
+        rethrow;
+      } finally {
+        try {
+          if (cachedFile != null && await cachedFile.exists()) {
+            await cachedFile.delete();
+          }
+        } catch (_) {
+          // Stale shared cache files are cleaned by the native bridge later.
+        }
+      }
+    }
+  }
+
   Future<void> _sendFile(
     File file,
     String name,

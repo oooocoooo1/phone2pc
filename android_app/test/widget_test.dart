@@ -8,6 +8,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:phone2pc_client/file_transfer_page.dart';
@@ -24,6 +25,31 @@ void main() {
     expect(find.text('智连 Phone2PC'), findsOneWidget);
     expect(find.text('连接'), findsOneWidget);
     expect(find.text('首次连接配对码'), findsOneWidget);
+  });
+
+  testWidgets('sharing while disconnected asks the user to reconnect', (
+    WidgetTester tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    await tester.pumpWidget(const MyApp());
+    await tester.pump();
+
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final call = const StandardMethodCodec().encodeMethodCall(
+      const MethodCall('shareReceived', <String, Object>{
+        'text': 'shared text',
+        'files': <Object>[],
+      }),
+    );
+    await messenger.handlePlatformMessage(
+      'io.github.oooocoooo1.phone2pc/share_intent',
+      call,
+      (_) {},
+    );
+    await tester.pump();
+
+    expect(find.text('尚未连接 PC，请连接后重新分享'), findsOneWidget);
   });
 
   testWidgets(
